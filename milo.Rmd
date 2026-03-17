@@ -16,6 +16,21 @@ knitr::opts_chunk$set(
 )
 ```
 
+# Environment
+A conda environment to process this analysis can be created with:
+
+```{bash, eval=FALSE}
+conda create -n milo_env -c conda-forge -c bioconda bioconductor-milor bioconductor-scater r-rmarkdown r-irkernel jupyterlab
+```
+
+If this fails on a mac (M processor) with an error about incompatable versions instead run:
+
+```{bash, eval=FALSE}
+CONDA_SUBDIR=osx-64 conda create -n milo_env -c conda-forge -c bioconda bioconductor-milor bioconductor-scater r-rmarkdown r-irkernel jupyterlab
+conda activate milo_env
+conda config --env --set subdir osx-64
+```
+
 # Overview
 
 This notebook reproduces part of the analysis shown in Fig. 1D and Fig. 1E of the paper [doi:10.1126/sciimmunol.abd1554](https://doi.org/10.1126/sciimmunol.abd1554). In this version, the dataset has been subset to include only healthy controls and severe COVID-19 patients.
@@ -36,11 +51,6 @@ This notebook assumes the input object has already been processed and contains t
 - UMAP coordinates stored in `X_umap`
 - metadata columns including `Sample`, `Condition`, and `Celltype`
 
-A conda environment to process this analysis can be created with:
-
-```{bash, eval=FALSE}
-conda create -n milo_env -c conda-forge -c bioconda r-rmarkdown bioconductor-milor bioconductor-scater -y
-```
 
 # Prepare Milo Analysis
 
@@ -58,7 +68,7 @@ suppressPackageStartupMessages({
 })
 
 dir_path <- 'milo_data'
-url <- 'https://www.dropbox.com/scl/fi/mhmrk9jimn0n1sasd0cqf/milo_data.rds?rlkey=taoyq18gizpxjodri6lj0bn14&st=na0zqg5r&raw=1'
+url <- 'https://github.com/Jon-bioinfo/keio_202603/raw/refs/heads/main/milo_data.rds'
 file_path <- 'milo_data/milo_data.rds'
 
 # create folder if it does not exist
