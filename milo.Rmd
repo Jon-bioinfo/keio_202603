@@ -1,0 +1,266 @@
+---
+title: "Milo Differential Abundance Analysis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+# Overview
+
+This notebook reproduces part of the analysis shown in Fig. 1D and Fig. 1E of the paper [doi:10.1126/sciimmunol.abd1554](https://doi.org/10.1126/sciimmunol.abd1554). In this version, the dataset has been subset to include only healthy controls and severe COVID-19 patients.
+
+The starting object used here has already been prepared with Harmony batch-corrected PCA coordinates and a UMAP embedding. That means the notebook begins from a processed single-cell object and focuses on neighborhood-based differential abundance testing with Milo, rather than raw preprocessing.
+
+As biological context, the relevant goal from the paper is to compare the relative abundance of immune cell populations across disease groups. In the severe COVID-19 group, the paper reports an increase in classical monocytes and decreases in several other PBMC populations, including dendritic cells, nonclassical monocytes, intermediate monocytes, NK cells, and effector-memory-like CD4+ and CD8+ T cells.
+
+# Objective
+
+Our objective is to test whether local neighborhoods of cells differ in abundance between healthy controls and severe COVID-19 patients, and then interpret those differences using cell type annotations. This provides a neighborhood-level view of the cell population shifts described in the paper.
+
+# Input Data and Assumptions
+
+This notebook assumes the input object has already been processed and contains the following:
+
+- Harmony-corrected PCA coordinates stored in `X_pca_harmony`
+- UMAP coordinates stored in `X_umap`
+- metadata columns including `Sample`, `Condition`, and `Celltype`
+
+A conda environment to process this analysis can be created with:
+
+```{bash, eval=FALSE}
+conda create -n milo_env -c conda-forge -c bioconda r-rmarkdown bioconductor-milor bioconductor-scater -y
+```
+
+# Prepare Milo Analysis
+
+## Load Data
+
+We begin by loading the libraries and single-cell dataset and converting it into a Milo object. We also create short, convenient metadata fields for the sample name and disease condition, which will be used throughout the workflow.
+
+```{r load}
+suppressPackageStartupMessages({
+  library(miloR)
+  library(SingleCellExperiment)
+  library(ggplot2)
+  library(scater)
+  library(patchwork)
+})
+
+dir_path <- 'milo_data'
+url <- 'https://www.dropbox.com/scl/fi/mhmrk9jimn0n1sasd0cqf/milo_data.rds?rlkey=taoyq18gizpxjodri6lj0bn14&st=na0zqg5r&raw=1'
+file_path <- 'milo_data/milo_data.rds'
+
+# create folder if it does not exist
+if (!dir.exists(dir_path)) {
+  dir.create(dir_path, recursive = TRUE)
+}
+
+# download file only if it does not already exist
+if (!file.exists(file_path)) {
+  download.file(url, destfile = file_path, mode = "wb")
+}
+
+sce <- readRDS(file_path)
+milo <- Milo(sce)
+```
+
+It is useful to check a few basic properties of the object right away. These summaries confirm the dataset dimensions, how many samples and conditions are present, and whether the metadata look sensible before we move on.
+
+```{r load-summary}
+dim(milo)
+table(milo$Condition)
+length(unique(milo$Sample))
+
+data.frame(
+  n_cells = ncol(milo),
+  n_genes = nrow(milo),
+  n_samples = length(unique(milo$Sample)),
+  n_conditions = length(unique(milo$Condition)),
+  n_celltypes = length(unique(milo$Celltype))
+)
+```
+
+## Inspect UMAP Annotations
+
+Before starting the Milo analysis, it is helpful to look at the UMAP and check how cells are distributed by sample, condition, and annotated cell type. These plots give a quick visual overview of the dataset and help confirm that the metadata columns are behaving as expected.
+
+```{r inspect-umap, fig.width=15, fig.height=4.5, fig.cap="UMAP visualizations colored by sample, condition, and cell type."}
+p_sample <- plotReducedDim(
+  milo,
+  dimred = "X_umap",
+  colour_by = "Sample"
+) +
+  ggtitle("UMAP colored by sample")
+
+p_condition <- plotReducedDim(
+  milo,
+  dimred = "X_umap",
+  colour_by = "Condition"
+) +
+  ggtitle("UMAP colored by condition")
+
+p_celltype <- plotReducedDim(
+  milo,
+  dimred = "X_umap",
+  colour_by = "Celltype",
+  text_by = "Celltype",
+  text_size = 3
+) +
+  ggtitle("UMAP colored by cell type") +
+  guides(fill = "none")
+
+p_sample + p_condition + p_celltype
+```
+
+## Build Graph
+
+Next, we build a nearest-neighbor graph in the Harmony-corrected PCA space. This graph links together cells with similar expression profiles and provides the structure Milo uses to define local neighborhoods. Here we use `k = 20` neighbors and `d = 30` Harmony dimensions, which are reasonable starting values for a PBMC dataset of this size.
+
+```{r build-graph}
+milo <- buildGraph(
+  milo,
+  k = 20,
+  d = 30,
+  reduced.dim = "X_pca_harmony"
+)
+```
+
+## Define Neighbourhoods
+
+Now we define neighborhoods on that graph. Each neighborhood is a local group of similar cells, and these neighborhoods are the units Milo will later compare between conditions. Here, `prop = 0.1` means Milo initially samples index cells from 10% of cells before graph-based refinement, which balances speed and neighborhood coverage.
+
+```{r define-neighbourhoods}
+milo <- makeNhoods(
+  milo,
+  prop = 0.1,
+  k = 20,
+  d = 30,
+  refinement_scheme = "graph",
+  reduced_dims = "X_pca_harmony"
+)
+```
+
+After creating neighborhoods, we can do a quick sanity check to confirm that Milo has stored them successfully and to see roughly how many neighborhoods were identified.
+
+```{r neighbourhood-summary}
+milo
+length(nhoodIndex(milo))
+```
+
+## Count Cells
+
+Here we count how many cells from each sample appear in each neighborhood. This gives us the neighborhood-by-sample count table needed for differential abundance testing.
+
+```{r count-cells}
+milo <- countCells(
+  milo,
+  meta.data = as.data.frame(colData(milo)),
+  sample = "Sample"
+)
+
+milo <- buildNhoodGraph(milo)
+```
+
+## Prepare Design Matrix
+
+Before running the statistical test, we need a design table that tells Milo which samples belong to which condition. We also reorder that table so it matches the neighborhood count matrix exactly. This alignment step is important because Milo expects the design table rows and count matrix columns to refer to samples in the same order.
+
+```{r prepare-design}
+milo$Condition <- relevel(factor(milo$Condition), ref = "Healthy Donor")
+table(milo$Condition)
+levels(milo$Condition)
+
+milo.design <- as.data.frame(xtabs(~ Condition + Sample, data = colData(milo)))
+milo.design <- milo.design[milo.design$Freq > 0, ]
+rownames(milo.design) <- milo.design$Sample
+milo.design <- milo.design[colnames(nhoodCounts(milo)), ]
+
+stopifnot(identical(rownames(milo.design), colnames(nhoodCounts(milo))))
+```
+
+# Run Differential Abundance Test
+
+This is the main analysis step. Milo tests whether any neighborhoods change in abundance between conditions, and then we add cell type labels so the results are easier to interpret biologically. Because we explicitly set the reference level above, the direction of the log-fold change is defined relative to that choice of condition baseline.
+
+```{r differential-abundance}
+da_results <- testNhoods(
+  milo,
+  reduced.dim = "X_pca_harmony",
+  design = ~Condition,
+  design.df = milo.design,
+  fdr.weighting = "graph-overlap"
+)
+
+da_results <- annotateNhoods(milo, da_results, coldata_col = "Celltype")
+```
+
+After the test finishes, it is helpful to inspect a few rows of the results and count how many neighborhoods pass the chosen false discovery threshold. This gives a quick sense of whether the test returned meaningful output.
+
+```{r da-summary}
+head(da_results)
+sum(da_results$SpatialFDR < 0.1, na.rm = TRUE)
+table(da_results$Celltype)
+```
+
+# Summarize Significant Neighbourhoods
+
+A compact table of the top-ranked neighborhoods makes it easier to inspect the strongest results before looking at the plots. Here we sort neighborhoods by `SpatialFDR` and show a few key columns.
+
+```{r top-da-table}
+head(
+  da_results[order(da_results$SpatialFDR), c("Nhood", "logFC", "PValue", "SpatialFDR", "Celltype")],
+  10
+)
+```
+
+# Visualize Results
+
+## Reduced Dimension and Neighbourhood Graph
+
+These two plots help us understand the results in context. The first shows the UMAP colored by cell type, and the second highlights which neighborhoods are differentially abundant across the same layout.
+
+```{r plot-umap, fig.width=10, fig.height=5, fig.cap="UMAP cell type annotation alongside the Milo neighborhood differential abundance graph."}
+p1 <- plotReducedDim(
+  milo,
+  dimred = "X_umap",
+  colour_by = "Celltype",
+  text_by = "Celltype",
+  text_size = 3
+) +
+  guides(fill = "none")
+
+p2 <- plotNhoodGraphDA(milo, da_results, layout = "X_umap", alpha = 0.1)
+# uncomment line below to save plot as a pdf
+# ggsave("milo_data/umaps.pdf", p1 + p2, height = 5, width = 10)
+p1 + p2
+```
+
+## Beeswarm Plot
+
+The beeswarm plot summarizes differential abundance results by cell type. This makes it easier to see which cell populations show the strongest evidence of change between conditions.
+
+```{r plot-beeswarm, fig.width=10, fig.height=7, fig.cap="Beeswarm summary of neighborhood differential abundance results grouped by cell type."}
+p3 <- plotDAbeeswarm(da_results, group.by = "Celltype")
+# uncomment line below to save plot as a pdf
+# ggsave("milo_data/beeswarm.pdf", p3, height = 7, width = 10)
+p3
+```
+
+# Session Info
+
+For reproducibility, it is good practice to record the R session information used to generate the notebook.
+
+```{r session-info}
+sessionInfo()
+```
