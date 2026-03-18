@@ -21,6 +21,7 @@ A conda environment to process this analysis can be created with:
 
 ```{bash, eval=FALSE}
 conda create -n milo_env -c conda-forge -c bioconda bioconductor-milor bioconductor-scater r-rmarkdown r-irkernel jupyterlab
+conda activate milo_env
 ```
 
 If this fails on a mac (M processor) with an error about incompatable versions instead run:
@@ -29,6 +30,15 @@ If this fails on a mac (M processor) with an error about incompatable versions i
 CONDA_SUBDIR=osx-64 conda create -n milo_env -c conda-forge -c bioconda bioconductor-milor bioconductor-scater r-rmarkdown r-irkernel jupyterlab
 conda activate milo_env
 conda config --env --set subdir osx-64
+```
+
+If this fails on windows, consider using WSL in the future. Or run (since bioconda is mostly not available for windows):
+```{bash, eval=FALSE}
+conda create -n milo_env -c conda-forge r-base=4.5 r-irkernel jupyterlab r-rmarkdown r-rcpp r-rcppEigen r-igraph r-mass r-bh r-purrr r-rcpparmadillo r-snow r-cpp11
+conda activate milo_env
+R
+install.packages("BiocManager")
+BiocManager::install(c("miloR", "scater"))
 ```
 
 # Overview
